@@ -194,7 +194,6 @@ def process_ebs_volumes():
                 print(message)
                 csv_writer.writerow([region, volume_id, "EBS", "Skipped - Too Old", "", create_time, message])
 
-# === S3 Tagging ===
 def process_s3_buckets():
     for region in REGIONS:
         print(f"Scanning S3 buckets in region: {region}")
@@ -218,7 +217,7 @@ def process_s3_buckets():
                     tags = {tag['Key']: tag['Value'] for tag in tag_set}
                 except s3.exceptions.ClientError as e:
                     if e.response['Error']['Code'] == 'NoSuchTagSet':
-                        tags = {}  # No tags for this bucket
+                        tags = {}
                     else:
                         raise
 
@@ -236,10 +235,13 @@ def process_s3_buckets():
                     continue
 
                 if creation_date >= CUTOFF:
-                    # Add the tag
+                    # Merge with existing tags
+                    tags[TAG_KEY] = TAG_VALUE
+                    tag_set = [{'Key': k, 'Value': v} for k, v in tags.items()]
+
                     s3.put_bucket_tagging(
                         Bucket=bucket_name,
-                        Tagging={'TagSet': [{'Key': TAG_KEY, 'Value': TAG_VALUE}]}
+                        Tagging={'TagSet': tag_set}
                     )
                     message = f"Successfully tagged S3 bucket: {bucket_name}"
                     print(message)
@@ -253,6 +255,7 @@ def process_s3_buckets():
                 message = f"Failed to process S3 bucket: {bucket_name}. Error: {str(e)}"
                 print(message)
                 csv_writer.writerow([region, bucket_name, "S3", "Failed", "", "", message])
+
 
 # === ECS Tagging ===
 def process_ecs_clusters():
@@ -844,30 +847,7 @@ def process_vpc_peerings():
                     message = f"Failed to tag VPC Peering: {peering_id}. Error: {str(e)}"
             print(message)
             csv_writer.writerow([region, peering_id, "VPCPeering", "", tag_value or TAG_VALUE, "", message])
-def process_direct_connect_gateways():
-    print("Scanning Direct Connect Gateways")
-    dx = boto3.client('directconnect')
-    try:
-        gateways = dx.describe_direct_connect_gateways()['directConnectGateways']
-    except Exception as e:
-        print(f"Failed to retrieve Direct Connect Gateways: {e}")
-        return
-    for gw in gateways:
-        gw_id = gw['directConnectGatewayId']
-        try:
-            tags = {tag['key']: tag['value'] for tag in dx.list_tags_for_resource(resourceArn=gw['directConnectGatewayArn'])['tags']}
-            tag_value = tags.get(TAG_KEY)
-            if tag_value == TAG_VALUE:
-                message = f"Skipping Direct Connect Gateway: {gw_id} (already tagged)"
-            elif tag_value:
-                message = f"Direct Connect Gateway {gw_id} has conflicting tag value: {tag_value}"
-            else:
-                dx.tag_resource(resourceArn=gw['directConnectGatewayArn'], tags=[{'key': TAG_KEY, 'value': TAG_VALUE}])
-                message = f"Successfully tagged Direct Connect Gateway: {gw_id}"
-        except Exception as e:
-            message = f"Failed to tag Direct Connect Gateway: {gw_id}. Error: {str(e)}"
-        print(message)
-        csv_writer.writerow(["global", gw_id, "DirectConnectGateway", "", tag_value or TAG_VALUE, "", message])
+
 def process_directory_service():
     for region in REGIONS:
         print(f"Scanning Directory Service in region: {region}")
@@ -1027,7 +1007,44 @@ def process_cloudtrail_trails():
                 message = f"Failed to tag CloudTrail: {name}. Error: {str(e)}"
             print(message)
             csv_writer.writerow([region, name, "CloudTrail", "", tag_value or TAG_VALUE, "", message])
+def process_sns_topics():
+    for region in REGIONS:
+        print(f"Scanning SNS topics in region: {region}")
+        sns = boto3.client('sns', region_name=region)
+        try:
+            topics = sns.list_topics().get('Topics', [])
+        except Exception as e:
+            print(f"Failed to retrieve SNS topics in {region}: {e}")
+            continue
 
+        for topic in topics:
+            topic_arn = topic['TopicArn']
+            try:
+                # Get existing tags
+                tags = {tag['Key']: tag['Value'] for tag in sns.list_tags_for_resource(ResourceArn=topic_arn).get('Tags', [])}
+                tag_value = tags.get(TAG_KEY)
+
+                if tag_value == TAG_VALUE:
+                    message = f"Skipping SNS topic: {topic_arn} (already tagged)"
+                    print(message)
+                    csv_writer.writerow([region, topic_arn, "SNS", "Already Tagged", tag_value, "", message])
+                    continue
+                elif tag_value:
+                    message = f"SNS topic {topic_arn} has conflicting tag value: {tag_value}"
+                    print(message)
+                    csv_writer.writerow([region, topic_arn, "SNS", "Conflicting Tag", tag_value, "", message])
+                    continue
+
+                # Add the tag
+                sns.tag_resource(ResourceArn=topic_arn, Tags=[{'Key': TAG_KEY, 'Value': TAG_VALUE}])
+                message = f"Successfully tagged SNS topic: {topic_arn}"
+                print(message)
+                csv_writer.writerow([region, topic_arn, "SNS", "Tagged", TAG_VALUE, "", message])
+
+            except Exception as e:
+                message = f"Failed to tag SNS topic: {topic_arn}. Error: {str(e)}"
+                print(message)
+                csv_writer.writerow([region, topic_arn, "SNS", "Failed", "", "", message])
 # === Run All ===
 def run_all():
     process_ec2_instances()
@@ -1051,13 +1068,13 @@ def run_all():
     process_nat_gateways()
     process_internet_gateways()
     process_vpc_peerings()
-    process_direct_connect_gateways()
     process_directory_service()
     process_fsx_filesystems()
     process_waf_web_acls()
     process_guardduty_detectors()
     process_storage_gateways()
     process_cloudtrail_trails()
+    process_sns_topics()
     
     csvfile.close()
     print(f"\nReport saved to: {csv_filename}")
